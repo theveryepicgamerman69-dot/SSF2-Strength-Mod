@@ -340,6 +340,8 @@ package com.mcleodgaming.ssf2.engine
                     };
                 };
             };
+            var myScale:Point = (mySprite is Character) ? Character(mySprite).getStrengthCollisionScale(myType) : mySprite.CurrentScale;
+            var theirScale:Point = (theirSprite is Character) ? Character(theirSprite).getStrengthCollisionScale(theirType) : theirSprite.CurrentScale;
             var priority:int = 6;
             if (((myType == HitBoxSprite.GRAB) || (theirType === HitBoxSprite.GRAB)))
             {
@@ -393,7 +395,7 @@ package com.mcleodgaming.ssf2.engine
                     j = 0;
                     while (j < theirHitBoxes.length)
                     {
-                        rect = myHitBoxes[i].hitTest(theirHitBoxes[j], mySprite.Location, theirSprite.Location, (!(mySprite.FacingForward)), (!(theirSprite.FacingForward)), mySprite.CurrentScale, theirSprite.CurrentScale, mySprite.CurrentRotation, theirSprite.CurrentRotation);
+                        rect = myHitBoxes[i].hitTest(theirHitBoxes[j], mySprite.Location, theirSprite.Location, (!(mySprite.FacingForward)), (!(theirSprite.FacingForward)), myScale, theirScale, mySprite.CurrentRotation, theirSprite.CurrentRotation);
                         if (rect)
                         {
                             tmpResult = new HitBoxCollisionResult(myHitBoxes[i], theirHitBoxes[j], new HitBoxSprite(myHitBoxes[i].Type, rect, myHitBoxes[i].Circular, myHitBoxes[i].CustomData));
@@ -410,7 +412,7 @@ package com.mcleodgaming.ssf2.engine
             }
             else
             {
-                if ((((collisionRect = HitBoxSprite.hitTestArray(myHitBoxes, theirHitBoxes, mySprite.Location, theirSprite.Location, (!(mySprite.FacingForward)), (!(theirSprite.FacingForward)), mySprite.CurrentScale, theirSprite.CurrentScale, mySprite.CurrentRotation, theirSprite.CurrentRotation)).length > 0) && (!(callback == null))))
+                if ((((collisionRect = HitBoxSprite.hitTestArray(myHitBoxes, theirHitBoxes, mySprite.Location, theirSprite.Location, (!(mySprite.FacingForward)), (!(theirSprite.FacingForward)), myScale, theirScale, mySprite.CurrentRotation, theirSprite.CurrentRotation)).length > 0) && (!(callback == null))))
                 {
                     cindex = 0;
                     while (cindex < collisionRect.length)

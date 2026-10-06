@@ -272,6 +272,7 @@ package com.mcleodgaming.ssf2.engine
         private var m_outsideCameraBounds:Boolean;
         private var m_outsideMainTerrain:Boolean;
         private var m_grabTimer:int;
+        private var m_strengthGrabLocked:Boolean;
         private var m_pummelTimer:int;
         private var m_justPummeled:Boolean;
         private var m_grabberID:int;
@@ -614,6 +615,11 @@ package com.mcleodgaming.ssf2.engine
             this.m_invisiblePulseToggle = false;
             this.m_invisiblePulseCount = 0;
             this.m_grabTimer = 0;
+            this.m_strengthGrabLocked = false;
+            if (StrengthSystem.DEBUG_TRACE)
+            {
+                this.traceStrengthStats();
+            };
             this.m_pummelTimer = 0;
             this.m_justPummeled = false;
             this.m_eggTimer = 0;
@@ -5151,6 +5157,85 @@ package com.mcleodgaming.ssf2.engine
                 };
                 i++;
             };
+            if (this.m_grabbed.length == 0)
+            {
+                this.m_strengthGrabLocked = false;
+            };
+        }
+
+        public function getStrengthScore():Number
+        {
+            return StrengthSystem.getStrength(this.m_characterStats);
+        }
+
+        public function traceStrengthStats():void
+        {
+            var strength:Number = this.getStrengthScore();
+            trace("[STRENGTH] " + this.m_characterStats.LinkageID +
+                " weight=" + this.m_characterStats.Weight1 +
+                " height=" + this.m_characterStats.Height +
+                " score=" + strength +
+                " dealt=" + StrengthSystem.getDamageDealtMultiplier(strength) +
+                " taken=" + StrengthSystem.getDamageTakenMultiplier(strength) +
+                " hitstun=" + StrengthSystem.getHitstunMultiplier(strength) +
+                " armor=" + StrengthSystem.getArmorThreshold(strength));
+        }
+
+        public function getStrengthCollisionScale(hitBoxType:uint):Point
+        {
+            var scale:Point = CurrentScale.clone();
+            if (inState(CState.GRABBING) &&
+                (hitBoxType == HitBoxSprite.GRAB || hitBoxType == HitBoxSprite.MASTER))
+            {
+                var reach:Number = StrengthSystem.getGrabReachMultiplier(this.getStrengthScore());
+                // Expand broad-phase bounds as well, so they cannot hide extended grabs.
+                // Do not shrink MASTER: it also covers unrelated attack/hurt boxes.
+                scale.x *= (hitBoxType == HitBoxSprite.MASTER) ? Math.max(1.0, reach) : reach;
+            }
+            return scale;
+        }
+
+        private function getStrengthGrabRatio(victim:Character):Number
+        {
+            return StrengthSystem.getMatchupRatio(this.getStrengthScore(), victim.getStrengthScore());
+        }
+
+        private function initializeStrengthGrab(victim:Character, baseLength:int):void
+        {
+            var ratio:Number = this.getStrengthGrabRatio(victim);
+            this.m_strengthGrabLocked = StrengthSystem.isGrabLocked(ratio);
+            this.m_grabTimer = StrengthSystem.ENABLED ? Math.max(1, int(Math.round(baseLength *
+                StrengthSystem.getGrabDurationMultiplier(ratio, victim.getStrengthScore())))) : baseLength;
+            // Strength affects escape, not the vanilla pummel cadence.
+            this.m_pummelTimer = Utils.calculatePummelTime(baseLength);
+            this.m_justPummeled = false;
+        }
+
+        private function isStrengthPummel(victim:Character):Boolean
+        {
+            return inState(CState.GRABBING) && this.m_justPummeled &&
+                this.m_grabbed.indexOf(victim) >= 0 && victim.inState(CState.CAUGHT);
+        }
+
+        private function getStrengthAttacker(attackObj:AttackDamage):Character
+        {
+            if (attackObj.Owner is Character)
+            {
+                return Character(attackObj.Owner);
+            }
+            var owner:InteractiveSprite = attackObj.Owner;
+            var depth:int = 0;
+            while (owner is Projectile && depth < 8)
+            {
+                // Reflections retain the original projectile owner; use the credited player.
+                if (Projectile(owner).WasReversed)
+                {
+                    return (attackObj.PlayerID > 0) ? STAGEDATA.getPlayerByID(attackObj.PlayerID) : null;
+                }
+                owner = Projectile(owner).getOwner();
+                depth++;
+            }
+            return (owner is Character) ? Character(owner) : null;
         }
 
         public function grabReleaseOpponent():void
@@ -5192,6 +5277,7 @@ package com.mcleodgaming.ssf2.engine
 
         public function grabRelease(windBox:Boolean=false):void
         {
+            this.m_strengthGrabLocked = false;
             var attackObj:AttackDamage;
             attackObj = new AttackDamage(-1, this);
             attackObj.AttackID = Utils.getUID();
@@ -5264,7 +5350,10 @@ package com.mcleodgaming.ssf2.engine
                             {
                                 m_xSpeed = 0;
                             };
-                            this.m_grabTimer--;
+                            if (!this.m_strengthGrabLocked)
+                            {
+                                this.m_grabTimer--;
+                            };
                             this.removeUngrabbedCharacters();
                             i = 0;
                             while (i < this.m_grabbed.length)
@@ -5276,13 +5365,17 @@ package com.mcleodgaming.ssf2.engine
                                 }
                                 else
                                 {
-                                    loss = this.m_grabbed[i].Struggle();
-                                    this.m_grabTimer = (this.m_grabTimer - ((loss > 0) ? loss : 0));
+                                    if (!this.m_strengthGrabLocked)
+                                    {
+                                        loss = this.m_grabbed[i].Struggle();
+                                        this.m_grabTimer = (this.m_grabTimer - ((loss > 0) ? loss : 0));
+                                    };
                                 };
                                 i++;
                             };
                             if (this.m_grabbed.length == 0)
                             {
+                                this.m_strengthGrabLocked = false;
                                 this.setState(CState.IDLE);
                                 return;
                             };
@@ -6468,9 +6561,13 @@ package com.mcleodgaming.ssf2.engine
                     };
                 };
             };
-            if (((this.m_grabbed.length == 0) && (inState(CState.GRABBING))))
+            if (this.m_grabbed.length == 0)
             {
-                this.setState(CState.IDLE);
+                this.m_strengthGrabLocked = false;
+                if (inState(CState.GRABBING))
+                {
+                    this.setState(CState.IDLE);
+                };
             };
         }
 
@@ -10845,6 +10942,10 @@ package com.mcleodgaming.ssf2.engine
             if (((inState(CState.GRABBING)) && (otherSprite as Character)))
             {
                 opponent = Character(otherSprite);
+                if (!StrengthSystem.canGrab(this.getStrengthGrabRatio(opponent)))
+                {
+                    return (false);
+                };
                 if ((((((((((((((((((this.m_grabbed.length <= 0) && ((!(opponent.Invincible)) || ((opponent.inState(CState.ATTACKING)) && (opponent.AttackStateData.ForceGrabbable)))) && (!(opponent.Dead))) && (!(opponent.Revival))) && (!(opponent.Caught()))) && (!(opponent.Grabbed.length > 0))) && (!(opponent.Frozen))) && (!(((opponent.Team == m_team_id) && (m_team_id > 0)) && (!(STAGEDATA.TeamDamage))))) && (!(opponent.UsingFinalSmash))) && (!(opponent.StandBy))) && (!(opponent.inState(CState.CRASH_LAND)))) && (!(opponent.inState(CState.KIRBY_STAR)))) && (!(opponent.Egg))) && (!(opponent.Frozen))) && (!(opponent.Pitfall))) && (!((!(m_attack.GrabBehind)) && ((((m_sprite.x + 20) < opponent.X) && (!(m_facingForward))) || (((m_sprite.x - 20) > opponent.X) && (m_facingForward)))))) && (checkLinearPathBetweenPoints(new Point(m_sprite.x, (m_sprite.y - (m_sprite.height / 2))), new Point(opponent.X, (opponent.Y - (opponent.Height / 2)))))))
                 {
                     if (((opponent.inState(CState.CRASH_LAND)) || (!(opponent.Capture(m_uid)))))
@@ -10858,9 +10959,7 @@ package com.mcleodgaming.ssf2.engine
                     this.checkLinkedProjectiles();
                     this.m_grabbed = new Vector.<Character>();
                     this.m_grabbed.push(opponent);
-                    this.m_grabTimer = ((opponent.CharacterStats.Stamina > 0) ? Utils.calculateGrabLength((opponent.CharacterStats.Stamina - opponent.getDamage())) : Utils.calculateGrabLength(opponent.getDamage()));
-                    this.m_pummelTimer = Utils.calculatePummelTime(this.m_grabTimer);
-                    this.m_justPummeled = false;
+                    this.initializeStrengthGrab(opponent, ((opponent.CharacterStats.Stamina > 0) ? Utils.calculateGrabLength((opponent.CharacterStats.Stamina - opponent.getDamage())) : Utils.calculateGrabLength(opponent.getDamage())));
                     opponent.FaceForward((!(m_facingForward)));
                     if (HasTouchBox)
                     {
@@ -12832,6 +12931,27 @@ package com.mcleodgaming.ssf2.engine
                     };
                 };
             };
+            var strengthAttacker:Character = this.getStrengthAttacker(attackObj);
+            var victimStrength:Number = this.getStrengthScore();
+            var attackerStrength:Number = strengthAttacker ? strengthAttacker.getStrengthScore() : 1.0;
+            var strengthRatio:Number = StrengthSystem.getMatchupRatio(attackerStrength, victimStrength);
+            var strengthDamageMultiplier:Number = 1.0;
+            if (attackObj.Damage > 0)
+            {
+                strengthDamageMultiplier = StrengthSystem.getDamageTakenMultiplier(victimStrength);
+                if (strengthAttacker)
+                {
+                    strengthDamageMultiplier *= StrengthSystem.getDamageDealtMultiplier(attackerStrength);
+                    if (!attackObj.IsThrow && attackObj.Owner === strengthAttacker &&
+                        strengthAttacker.isStrengthPummel(this))
+                    {
+                        strengthDamageMultiplier *= StrengthSystem.getPummelMultiplier(strengthRatio);
+                    };
+                };
+            };
+            var strengthThrowMultiplier:Number = (attackObj.IsThrow && strengthAttacker) ?
+                StrengthSystem.getThrowMultiplier(strengthRatio) : 1.0;
+            var strengthHitstun:Number = (attackObj.Damage > 0) ? victimStrength : 1.0;
             preDamage = ((attackObj.Damage <= 0) ? 0 : Utils.calculateChargeDamage(attackObj));
             preKBVelocity = ((m_baseStats.Stamina > 0) ? Utils.calculateVelocity(Utils.calculateKnockback(attackObj.KBConstant, attackObj.Power, attackObj.WeightKB, 0, 0, (this.m_characterStats.Weight1 * weight1Multiplier), ((inState(CState.ATTACKING)) && ((currentStanceFrameIs("charging")) && (m_attack.AttackType === 1))), this.m_characterStats.DamageRatio, attackObj.AttackRatio)) : Utils.calculateVelocity(Utils.calculateKnockback(attackObj.KBConstant, attackObj.Power, attackObj.WeightKB, preDamage, oldDamage, (this.m_characterStats.Weight1 * weight1Multiplier), ((inState(CState.ATTACKING)) && ((currentStanceFrameIs("charging")) && (m_attack.AttackType === 1))), this.m_characterStats.DamageRatio, attackObj.AttackRatio)));
             if (this.m_sizeStatus != 0)
@@ -12850,9 +12970,13 @@ package com.mcleodgaming.ssf2.engine
             {
                 tmpHeavyArmor = -(Character.HEAVY_KNOCKBACK_THRESHOLD);
             };
-            if ((((((attackObj.Paralysis > 0) && (m_paralysis)) || (inState(CState.EGG))) || ((inState(CState.ATTACKING)) && (((m_attack.SuperArmor) && (!(attackObj.BypassSuperArmor))) || ((((!(m_attack.HeavyArmor == 0)) && (!(attackObj.BypassHeavyArmor))) && (!((attackObj.IsThrow) && (this.m_isMetal)))) && (((m_attack.HeavyArmor > 0) && (preDamage <= m_attack.HeavyArmor)) || ((m_attack.HeavyArmor < 0) && (preKBVelocity <= -(m_attack.HeavyArmor)))))))) || ((((!(tmpHeavyArmor == 0)) && (!(attackObj.BypassHeavyArmor))) && (!((attackObj.IsThrow) && (this.m_isMetal)))) && (((tmpHeavyArmor > 0) && (preDamage <= tmpHeavyArmor)) || ((tmpHeavyArmor < 0) && (preKBVelocity <= -(tmpHeavyArmor)))))))
+            var strengthArmorThreshold:Number = StrengthSystem.getArmorThreshold(victimStrength);
+            var strengthArmored:Boolean = !attackObj.IsThrow && !attackObj.BypassHeavyArmor &&
+                !inState(CState.CAUGHT) && preDamage > 0 && strengthArmorThreshold > 0 &&
+                preDamage * attackObj.StaleMultiplier * strengthDamageMultiplier <= strengthArmorThreshold;
+            if (strengthArmored || (((((attackObj.Paralysis > 0) && (m_paralysis)) || (inState(CState.EGG))) || ((inState(CState.ATTACKING)) && (((m_attack.SuperArmor) && (!(attackObj.BypassSuperArmor))) || ((((!(m_attack.HeavyArmor == 0)) && (!(attackObj.BypassHeavyArmor))) && (!((attackObj.IsThrow) && (this.m_isMetal)))) && (((m_attack.HeavyArmor > 0) && (preDamage <= m_attack.HeavyArmor)) || ((m_attack.HeavyArmor < 0) && (preKBVelocity <= -(m_attack.HeavyArmor)))))))) || ((((!(tmpHeavyArmor == 0)) && (!(attackObj.BypassHeavyArmor))) && (!((attackObj.IsThrow) && (this.m_isMetal)))) && (((tmpHeavyArmor > 0) && (preDamage <= tmpHeavyArmor)) || ((tmpHeavyArmor < 0) && (preKBVelocity <= -(tmpHeavyArmor)))))))
             {
-                if (((tmpLaunchResistance <= 0) || ((tmpLaunchResistance > 0) && (tmpLaunchResistanceDiff <= 0))))
+                if (strengthArmored || ((tmpLaunchResistance <= 0) || ((tmpLaunchResistance > 0) && (tmpLaunchResistanceDiff <= 0))))
                 {
                     flipSuperArmor = true;
                     tmpHasEffect = attackObj.HasEffect;
@@ -12971,6 +13095,7 @@ package com.mcleodgaming.ssf2.engine
                 tempVelocity = 0;
                 tempDamage = ((attackObj.Damage <= 0) ? 0 : Utils.calculateChargeDamage(attackObj));
                 tempDamage = (tempDamage * attackObj.StaleMultiplier);
+                tempDamage *= strengthDamageMultiplier;
                 if (inState(CState.FROZEN))
                 {
                     tempDamage = (tempDamage / 2);
@@ -13047,11 +13172,11 @@ package com.mcleodgaming.ssf2.engine
                 if (m_paralysis)
                 {
                     this.stopActionShot(false, true);
-                    startActionShot(Utils.calculateHitStun(attackObj.HitStun, tempDamage, attackObj.Shock, (prevState == CState.CROUCH)));
+                    startActionShot(StrengthSystem.scaleHitstun(Utils.calculateHitStun(attackObj.HitStun, tempDamage, attackObj.Shock, (prevState == CState.CROUCH)), strengthHitstun));
                 }
                 else
                 {
-                    startActionShot(Utils.calculateHitStun(attackObj.HitStun, tempDamage, attackObj.Shock, (prevState == CState.CROUCH)), attackObj.Paralysis);
+                    startActionShot(StrengthSystem.scaleHitstun(Utils.calculateHitStun(attackObj.HitStun, tempDamage, attackObj.Shock, (prevState == CState.CROUCH)), strengthHitstun), attackObj.Paralysis);
                     this.m_lastHitStun = m_actionTimer;
                 };
                 this.checkDI();
@@ -13074,7 +13199,12 @@ package com.mcleodgaming.ssf2.engine
                 {
                     tempKnockback = (tempKnockback / 4);
                 };
+                tempKnockback *= strengthThrowMultiplier;
                 tempVelocity = ((tmpLaunchResistanceDiff > 0) ? tmpLaunchResistanceDiff : Utils.calculateVelocity(tempKnockback));
+                if (tmpLaunchResistanceDiff > 0)
+                {
+                    tempVelocity *= strengthThrowMultiplier;
+                };
                 tempKnockback = ((tmpLaunchResistanceDiff > 0) ? Utils.calculateKnockbackFromVelocity(tempVelocity) : tempKnockback);
                 if ((!(this.m_characterStats.CanReceiveKnockback)))
                 {
@@ -13163,7 +13293,7 @@ package com.mcleodgaming.ssf2.engine
                         STAGEDATA.CamRef.addZoomFocus(attackObj.Owner.MC, attackObj.SelfHitStun);
                     };
                     STAGEDATA.CamRef.forceTarget();
-                    startActionShot(attackObj.HitStun);
+                    startActionShot(StrengthSystem.scaleHitstun(attackObj.HitStun, strengthHitstun));
                     this.m_lastHitStun = m_actionTimer;
                 };
                 angle = Utils.calculateReversedAngle(Utils.calculateAttackDirection(attackObj, this), attackObj, this);
@@ -13582,6 +13712,7 @@ package com.mcleodgaming.ssf2.engine
                 this.m_windBoxHit = true;
                 tempDamage = ((((attackObj.Damage <= 0) || (this.isInvincible())) || (isIntangible())) ? 0 : Utils.calculateChargeDamage(attackObj));
                 tempDamage = (tempDamage * attackObj.StaleMultiplier);
+                tempDamage *= strengthDamageMultiplier;
                 if (inState(CState.FROZEN))
                 {
                     tempDamage = (tempDamage / 2);
@@ -17256,6 +17387,12 @@ package com.mcleodgaming.ssf2.engine
         {
             if (this.m_grabbed.length === 1)
             {
+                if (!StrengthSystem.canGrab(this.getStrengthGrabRatio(this.m_grabbed[0])))
+                {
+                    this.grabReleaseOpponent();
+                    this.grabRelease();
+                    return;
+                };
                 this.m_internalGrabLock = true;
                 this.forceEndAttack();
                 this.m_internalGrabLock = false;
@@ -17263,9 +17400,7 @@ package com.mcleodgaming.ssf2.engine
                 {
                     m_attack.Frame = "grab";
                     this.setState(CState.GRABBING);
-                    this.m_grabTimer = Utils.calculateGrabLength(((this.m_grabbed[0].CharacterStats.Stamina > 0) ? (this.m_grabbed[0].CharacterStats.Stamina - this.m_grabbed[0].getDamage()) : this.m_grabbed[0].getDamage()));
-                    this.m_pummelTimer = Utils.calculatePummelTime(this.m_grabTimer);
-                    this.m_justPummeled = false;
+                    this.initializeStrengthGrab(this.m_grabbed[0], Utils.calculateGrabLength(((this.m_grabbed[0].CharacterStats.Stamina > 0) ? (this.m_grabbed[0].CharacterStats.Stamina - this.m_grabbed[0].getDamage()) : this.m_grabbed[0].getDamage())));
                     this.stancePlayFrame("grabbed");
                     m_attack.AttackID = Utils.getUID();
                     m_attack.ID = Utils.getUID();
