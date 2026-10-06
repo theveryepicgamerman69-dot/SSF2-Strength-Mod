@@ -33,6 +33,7 @@ package com.mcleodgaming.ssf2.engine
         public static const ATTACK_IDLE:String = "attack_idle";
 
         protected var m_owner:InteractiveSprite;
+        private var m_strengthNormalAttack:Boolean = false;
         private var m_bounce_total:int;
         private var m_xSpeedInit:Number;
         private var m_ySpeedInit:Number;
@@ -70,6 +71,7 @@ package com.mcleodgaming.ssf2.engine
             m_apiInstance = new SSF2Projectile(this.m_projectileStats.ClassAPI, this);
             this.m_projectileStats.importData(m_apiInstance.getOwnStats());
             this.m_owner = parameters["owner"];
+            this.m_strengthNormalAttack = this.isStrengthNormalAttackSource(this.m_owner);
             var tmpMC:MovieClip = ResourceManager.getLibraryMC(this.m_projectileStats.LinkageID);
             tmpMC.ACTIVE = true;
             super(tmpMC, stageData);
@@ -561,6 +563,24 @@ package com.mcleodgaming.ssf2.engine
         public function getOwner():InteractiveSprite
         {
             return (this.m_owner);
+        }
+
+        private function isStrengthNormalAttackSource(owner:InteractiveSprite):Boolean
+        {
+            if (owner is Character)
+            {
+                return owner.AttackStateData.IsAttacking && !owner.AttackStateData.IsThrow &&
+                    !Character(owner).UsingFinalSmash &&
+                    StrengthSystem.isNormalAttackFrame(owner.AttackStateData.Frame);
+            };
+            return owner is Projectile && Projectile(owner).StrengthNormalAttack;
+        }
+
+        public function get StrengthNormalAttack():Boolean
+        {
+            // Preserve launch provenance even if the fighter starts another move before impact.
+            // Reflections do not turn a special projectile into a normal attack.
+            return this.m_strengthNormalAttack && !this.m_wasReversed;
         }
 
         public function getOwnerAPI():*

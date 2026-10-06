@@ -27,10 +27,17 @@ package com.mcleodgaming.ssf2.engine
         public static const DAMAGE_DEALT_POWER:Number = 0.14;
         public static const DAMAGE_TAKEN_POWER:Number = -0.12;
         public static const HITSTUN_POWER:Number = -0.45;
-        public static const ARMOR_START:Number = 1.25;
+        public static const ARMOR_START:Number = 1.0;
         public static const ARMOR_POWER:Number = 1.10;
-        public static const ARMOR_SCALE:Number = 3.0;
-        public static const MAX_ARMOR_DAMAGE:Number = 6.0;
+        public static const ARMOR_SCALE:Number = 12.0;
+        public static const MAX_ARMOR_DAMAGE:Number = 30.0;
+        // Defender/attacker ratio. This armor has no per-hit damage ceiling.
+        public static const MATCHUP_ARMOR_RATIO:Number = 1.70;
+        public static const WEAK_ATTACK_DAMAGE_POWER:Number = 3.0;
+        public static const MIN_WEAK_ATTACK_DAMAGE:Number = 0.03;
+        public static const MAX_ARMORED_ATTACK_DAMAGE:Number = 0.10;
+        public static const DIZZY_STRENGTH_RATIO:Number = 2.50;
+        public static const STRENGTH_DIZZY_FRAMES:int = 90;
         public static const PUMMEL_POWER:Number = 1.40;
         public static const MIN_PUMMEL_DAMAGE:Number = 0.20;
         public static const MAX_PUMMEL_DAMAGE:Number = 5.0;
@@ -130,6 +137,35 @@ package com.mcleodgaming.ssf2.engine
                 return 0.0;
             }
             return Math.min(MAX_ARMOR_DAMAGE, ARMOR_SCALE * Math.pow(strength - ARMOR_START, ARMOR_POWER));
+        }
+
+        public static function hasMatchupArmor(attackerVictimRatio:Number):Boolean
+        {
+            return ENABLED && attackerVictimRatio > 0 &&
+                attackerVictimRatio <= 1.0 / MATCHUP_ARMOR_RATIO;
+        }
+
+        public static function getWeakAttackDamageMultiplier(attackerVictimRatio:Number):Number
+        {
+            if (!ENABLED || attackerVictimRatio >= 1.0)
+            {
+                return 1.0;
+            }
+            var multiplier:Number = clamp(Math.pow(attackerVictimRatio, WEAK_ATTACK_DAMAGE_POWER),
+                MIN_WEAK_ATTACK_DAMAGE, 1.0);
+            return hasMatchupArmor(attackerVictimRatio) ?
+                Math.min(MAX_ARMORED_ATTACK_DAMAGE, multiplier) : multiplier;
+        }
+
+        public static function isNormalAttackFrame(frame:String):Boolean
+        {
+            return frame != null && (frame == "a" || frame.indexOf("a_") == 0 ||
+                frame == "crouch_attack" || frame == "getup_attack" || frame == "ledge_attack");
+        }
+
+        public static function getDizzyDuration(attackerVictimRatio:Number):int
+        {
+            return (ENABLED && attackerVictimRatio >= DIZZY_STRENGTH_RATIO) ? STRENGTH_DIZZY_FRAMES : 0;
         }
 
         public static function getPummelMultiplier(ratio:Number):Number

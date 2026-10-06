@@ -5217,6 +5217,56 @@ package com.mcleodgaming.ssf2.engine
                 this.m_grabbed.indexOf(victim) >= 0 && victim.inState(CState.CAUGHT);
         }
 
+        override public function createTimer(interval:int, repeats:int, func:Function, options:Object=null):void
+        {
+            // The stock DK cargo movie owns its own escape timer; m_grabTimer is not used.
+            // Keep the original callback identity so native throws/escape can destroy it.
+            var cargoClip:MovieClip = this.Stance;
+            if (StrengthSystem.ENABLED && this.m_characterStats.LinkageID == "donkeykong" &&
+                m_attack.Frame == "throw_forward" && this.m_grabbed.length > 0 && cargoClip &&
+                "getFree" in cargoClip && "endTimer" in cargoClip && func === cargoClip["getFree"])
+            {
+                var victim:Character = this.m_grabbed[0];
+                var ratio:Number = this.getStrengthGrabRatio(victim);
+                cargoClip["endTimer"] = Math.max(1, int(Math.round(Number(cargoClip["endTimer"]) *
+                    StrengthSystem.getGrabDurationMultiplier(ratio, victim.getStrengthScore()))));
+                if (StrengthSystem.isGrabLocked(ratio))
+                {
+                    var cargoOptions:Object = {};
+                    if (options)
+                    {
+                        for (var key:String in options)
+                        {
+                            cargoOptions[key] = options[key];
+                        };
+                    };
+                    // Pause both natural decay and cargo-specific mashing, not movement/throws.
+                    cargoOptions.hitStunPause = false;
+                    cargoOptions.pauseCondition = function():Boolean { return true; };
+                    options = cargoOptions;
+                };
+            };
+            super.createTimer(interval, repeats, func, options);
+        }
+
+        private function getStrengthDizzy(attackObj:AttackDamage, attacker:Character, ratio:Number):int
+        {
+            if (!attacker || attackObj.IsThrow ||
+                !attackObj.HasEffect || attackObj.Damage <= 0 || attacker.m_usingSpecialAttack ||
+                attacker.isStrengthPummel(this))
+            {
+                return 0;
+            };
+            var normalAttack:Boolean = (attackObj.Owner === attacker) ?
+                StrengthSystem.isNormalAttackFrame(attackObj.Frame) :
+                (attackObj.Owner is Projectile && Projectile(attackObj.Owner).StrengthNormalAttack);
+            if (!normalAttack)
+            {
+                return 0;
+            };
+            return StrengthSystem.getDizzyDuration(ratio);
+        }
+
         private function getStrengthAttacker(attackObj:AttackDamage):Character
         {
             if (attackObj.Owner is Character)
@@ -12935,6 +12985,11 @@ package com.mcleodgaming.ssf2.engine
             var victimStrength:Number = this.getStrengthScore();
             var attackerStrength:Number = strengthAttacker ? strengthAttacker.getStrengthScore() : 1.0;
             var strengthRatio:Number = StrengthSystem.getMatchupRatio(attackerStrength, victimStrength);
+            var strengthMatchupArmored:Boolean = strengthAttacker != null && !attackObj.IsThrow &&
+                !inState(CState.CAUGHT) && attackObj.Damage > 0 &&
+                StrengthSystem.hasMatchupArmor(strengthRatio);
+            var strengthDizzy:int = strengthMatchupArmored ? 0 : Math.max(attackObj.Dizzy,
+                this.getStrengthDizzy(attackObj, strengthAttacker, strengthRatio));
             var strengthDamageMultiplier:Number = 1.0;
             if (attackObj.Damage > 0)
             {
@@ -12942,6 +12997,7 @@ package com.mcleodgaming.ssf2.engine
                 if (strengthAttacker)
                 {
                     strengthDamageMultiplier *= StrengthSystem.getDamageDealtMultiplier(attackerStrength);
+                    strengthDamageMultiplier *= StrengthSystem.getWeakAttackDamageMultiplier(strengthRatio);
                     if (!attackObj.IsThrow && attackObj.Owner === strengthAttacker &&
                         strengthAttacker.isStrengthPummel(this))
                     {
@@ -12971,9 +13027,10 @@ package com.mcleodgaming.ssf2.engine
                 tmpHeavyArmor = -(Character.HEAVY_KNOCKBACK_THRESHOLD);
             };
             var strengthArmorThreshold:Number = StrengthSystem.getArmorThreshold(victimStrength);
-            var strengthArmored:Boolean = !attackObj.IsThrow && !attackObj.BypassHeavyArmor &&
-                !inState(CState.CAUGHT) && preDamage > 0 && strengthArmorThreshold > 0 &&
-                preDamage * attackObj.StaleMultiplier * strengthDamageMultiplier <= strengthArmorThreshold;
+            var strengthArmored:Boolean = !isIntangible() && (strengthMatchupArmored ||
+                (!attackObj.IsThrow && !attackObj.BypassHeavyArmor && !inState(CState.CAUGHT) &&
+                preDamage > 0 && strengthArmorThreshold > 0 &&
+                preDamage * attackObj.StaleMultiplier * strengthDamageMultiplier <= strengthArmorThreshold));
             if (strengthArmored || (((((attackObj.Paralysis > 0) && (m_paralysis)) || (inState(CState.EGG))) || ((inState(CState.ATTACKING)) && (((m_attack.SuperArmor) && (!(attackObj.BypassSuperArmor))) || ((((!(m_attack.HeavyArmor == 0)) && (!(attackObj.BypassHeavyArmor))) && (!((attackObj.IsThrow) && (this.m_isMetal)))) && (((m_attack.HeavyArmor > 0) && (preDamage <= m_attack.HeavyArmor)) || ((m_attack.HeavyArmor < 0) && (preKBVelocity <= -(m_attack.HeavyArmor)))))))) || ((((!(tmpHeavyArmor == 0)) && (!(attackObj.BypassHeavyArmor))) && (!((attackObj.IsThrow) && (this.m_isMetal)))) && (((tmpHeavyArmor > 0) && (preDamage <= tmpHeavyArmor)) || ((tmpHeavyArmor < 0) && (preKBVelocity <= -(tmpHeavyArmor)))))))
             {
                 if (strengthArmored || ((tmpLaunchResistance <= 0) || ((tmpLaunchResistance > 0) && (tmpLaunchResistanceDiff <= 0))))
@@ -13363,7 +13420,7 @@ package com.mcleodgaming.ssf2.engine
                     STAGEDATA.playSpecificSound(attackObj.MeteorSFX);
                 };
                 this.killAllSpeeds();
-                if ((((attackObj.Dizzy > 0) && ((wasDizzy) || (!(m_collision.ground)))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((!strengthMatchupArmored && strengthDizzy > 0)) && ((wasDizzy) || (!(m_collision.ground)))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     tempVelocity = 0;
                 };
@@ -13410,7 +13467,7 @@ package com.mcleodgaming.ssf2.engine
                         this.m_canWallTech = false;
                     };
                 };
-                if ((((((((((((attackObj.Pitfall > 0) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(wasPitfall))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (m_collision.ground)) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((((!strengthMatchupArmored && attackObj.Pitfall > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(wasPitfall))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (m_collision.ground)) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     this.m_pitfallTimer = (attackObj.Pitfall + (0.6 * m_damage));
                     this.resetRotation();
@@ -13436,7 +13493,7 @@ package com.mcleodgaming.ssf2.engine
                 {
                     this.playGlobalSound(attackObj.EffectSound);
                 };
-                if ((((((((((((attackObj.Stun > 0) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((((!strengthMatchupArmored && attackObj.Stun > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     this.setState(CState.STUNNED);
                     this.m_stunCancelTimer.reset();
@@ -13445,21 +13502,21 @@ package com.mcleodgaming.ssf2.engine
                     Utils.rotateAroundCenter(m_sprite.stance, m_facingForward, 0);
                     this.killAllSpeeds(false, true);
                 };
-                if (((((((((((((attackObj.Dizzy > 0) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!((wasDizzy) && (!(m_collision.ground))))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if ((((((((((((((!strengthMatchupArmored && strengthDizzy > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!((wasDizzy) && (!(m_collision.ground))))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     this.setState(CState.DIZZY);
                     this.m_stunCancelTimer.reset();
-                    this.m_dizzyTimer = (attackObj.Dizzy + (0.6 * m_damage));
+                    this.m_dizzyTimer = (strengthDizzy + (0.6 * m_damage));
                     this.resetRotation();
                     Utils.rotateAroundCenter(m_sprite.stance, m_facingForward, 0);
                     this.killAllSpeeds(false, true);
                     this.m_dizzyShield = (((attackObj.Owner) && (attackObj.Owner is Character)) && (Character(attackObj.Owner).UsingFinalSmash));
                 };
-                if ((((((((((attackObj.Freeze > 0) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((!strengthMatchupArmored && attackObj.Freeze > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     this.freeze(true, attackObj.Freeze);
                 };
-                if ((((((((((((attackObj.Sleep > 0) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((((!strengthMatchupArmored && attackObj.Sleep > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     this.setState(CState.SLEEP);
                     this.m_stunCancelTimer.reset();
@@ -13468,7 +13525,7 @@ package com.mcleodgaming.ssf2.engine
                     Utils.rotateAroundCenter(m_sprite.stance, m_facingForward, 0);
                     this.killAllSpeeds(false, true);
                 };
-                if ((((((((((attackObj.Egg > 0) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((!strengthMatchupArmored && attackObj.Egg > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     this.egg(true);
                 };
@@ -13692,7 +13749,7 @@ package com.mcleodgaming.ssf2.engine
                 };
                 return (true);
             };
-            if ((((((((!(attackObj.HasEffect)) && (!(inState(CState.LEDGE_HANG)))) && (!(inState(CState.LEDGE_CLIMB)))) && (!(inState(CState.LEDGE_ROLL)))) && (!((inState(CState.ATTACKING)) && (m_attack.Frame == "ledge_attack")))) && (!((isIntangible()) && (attackObj.Damage > 0)))) && (!((this.m_characterStats.WindArmor > 0) && (preWindKnockbackSpeed <= this.m_characterStats.WindArmor)))))
+            if (strengthArmored || (((((((!(attackObj.HasEffect)) && (!(inState(CState.LEDGE_HANG)))) && (!(inState(CState.LEDGE_CLIMB)))) && (!(inState(CState.LEDGE_ROLL)))) && (!((inState(CState.ATTACKING)) && (m_attack.Frame == "ledge_attack")))) && (!((isIntangible()) && (attackObj.Damage > 0)))) && (!((this.m_characterStats.WindArmor > 0) && (preWindKnockbackSpeed <= this.m_characterStats.WindArmor)))))
             {
                 if (((!(m_hurtInterrupt == null)) && (m_hurtInterrupt({
                     "target":(((attackObj.Owner) && (attackObj.Owner.APIInstance)) ? attackObj.Owner.APIInstance.instance : null),
@@ -13708,7 +13765,10 @@ package com.mcleodgaming.ssf2.engine
                     };
                     return (false);
                 };
-                startActionShot(-1, attackObj.Paralysis);
+                if (!strengthMatchupArmored)
+                {
+                    startActionShot(-1, attackObj.Paralysis);
+                };
                 this.m_windBoxHit = true;
                 tempDamage = ((((attackObj.Damage <= 0) || (this.isInvincible())) || (isIntangible())) ? 0 : Utils.calculateChargeDamage(attackObj));
                 tempDamage = (tempDamage * attackObj.StaleMultiplier);
@@ -13810,7 +13870,7 @@ package com.mcleodgaming.ssf2.engine
                     };
                     this.m_forceTumbleFall = attackObj.ForceTumbleFall;
                 };
-                if ((((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && (attackObj.Stun > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if ((((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && ((!strengthMatchupArmored && attackObj.Stun > 0))) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     if (((prevState === CState.CAUGHT) && (this.m_hitForceVisible)))
                     {
@@ -13827,7 +13887,7 @@ package com.mcleodgaming.ssf2.engine
                     this.killAllSpeeds(false, true);
                     Utils.rotateAroundCenter(m_sprite.stance, m_facingForward, 0);
                 };
-                if ((((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && (attackObj.Dizzy > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if ((((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && ((!strengthMatchupArmored && strengthDizzy > 0))) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     if (((prevState === CState.CAUGHT) && (this.m_hitForceVisible)))
                     {
@@ -13839,13 +13899,13 @@ package com.mcleodgaming.ssf2.engine
                     };
                     this.setState(CState.DIZZY);
                     this.m_stunCancelTimer.reset();
-                    this.m_dizzyTimer = (attackObj.Dizzy + (0.6 * m_damage));
+                    this.m_dizzyTimer = (strengthDizzy + (0.6 * m_damage));
                     this.resetRotation();
                     Utils.rotateAroundCenter(m_sprite.stance, m_facingForward, 0);
                     this.killAllSpeeds(false, true);
                     this.m_dizzyShield = (((attackObj.Owner) && (attackObj.Owner is Character)) && (Character(attackObj.Owner).UsingFinalSmash));
                 };
-                if (((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && (attackObj.Freeze > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && ((!strengthMatchupArmored && attackObj.Freeze > 0))) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     if (((prevState === CState.CAUGHT) && (this.m_hitForceVisible)))
                     {
@@ -13853,7 +13913,7 @@ package com.mcleodgaming.ssf2.engine
                     };
                     this.freeze(true, attackObj.Freeze);
                 };
-                if ((((((((((((attackObj.Sleep > 0) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((((!strengthMatchupArmored && attackObj.Sleep > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(inState(CState.BARREL)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     if (((prevState === CState.CAUGHT) && (this.m_hitForceVisible)))
                     {
@@ -13870,7 +13930,7 @@ package com.mcleodgaming.ssf2.engine
                     this.killAllSpeeds(false, true);
                     Utils.rotateAroundCenter(m_sprite.stance, m_facingForward, 0);
                 };
-                if (((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && (attackObj.Egg > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && ((!strengthMatchupArmored && attackObj.Egg > 0))) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (!(inState(CState.STAMINA_KO)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     if (((prevState === CState.CAUGHT) && (this.m_hitForceVisible)))
                     {
@@ -13878,7 +13938,7 @@ package com.mcleodgaming.ssf2.engine
                     };
                     this.egg(true);
                 };
-                if ((((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && (attackObj.Pitfall > 0)) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (m_collision.ground)) && (!(inState(CState.STAMINA_KO)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if ((((((((((((((!(this.isInvincible())) && (!(isIntangible()))) && ((!strengthMatchupArmored && attackObj.Pitfall > 0))) && (!(inState(CState.STUNNED)))) && (!(inState(CState.FROZEN)))) && (!(inState(CState.DIZZY)))) && (!(inState(CState.PITFALL)))) && (!(inState(CState.SLEEP)))) && (!(inState(CState.EGG)))) && (m_collision.ground)) && (!(inState(CState.STAMINA_KO)))) && (!(grabbedDuringFinalSmash))) && (!(this.m_characterStats.StatusEffectImmunity))))
                 {
                     if (this.m_grabbed.length > 0)
                     {
@@ -18654,4 +18714,3 @@ package com.mcleodgaming.ssf2.engine
 
     }
 }//package com.mcleodgaming.ssf2.engine
-
