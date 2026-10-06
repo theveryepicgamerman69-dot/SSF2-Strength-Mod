@@ -37,7 +37,7 @@ package com.mcleodgaming.ssf2.engine
         public static const MIN_WEAK_ATTACK_DAMAGE:Number = 0.03;
         public static const MAX_ARMORED_ATTACK_DAMAGE:Number = 0.10;
         public static const DIZZY_STRENGTH_RATIO:Number = 2.50;
-        public static const STRENGTH_DIZZY_FRAMES:int = 90;
+        public static const STRENGTH_DIZZY_FRAMES:int = 900;
         public static const PUMMEL_POWER:Number = 1.40;
         public static const MIN_PUMMEL_DAMAGE:Number = 0.20;
         public static const MAX_PUMMEL_DAMAGE:Number = 5.0;

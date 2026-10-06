@@ -10,6 +10,7 @@ const engine = path.join(__dirname, '..', 'src', 'Super Smash Flash 2 Beta v1.3.
 const strengthSource = fs.readFileSync(path.join(engine, 'StrengthSystem.as'), 'utf8');
 const characterSource = fs.readFileSync(path.join(engine, 'Character.as'), 'utf8');
 const spriteSource = fs.readFileSync(path.join(engine, 'InteractiveSprite.as'), 'utf8');
+const dkStats = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'dk-cargo-stats.json'), 'utf8'));
 const projectileSource = fs.readFileSync(path.join(engine, 'Projectile.as'), 'utf8');
 
 function bodyAt(source, opening) {
@@ -133,7 +134,7 @@ test('Hitstun retains zero/sentinels and armor starts only above its cutoff', ()
     assert.ok(S.getArmorThreshold(1.0001) > 0);
 });
 
-const CState = { GRABBING: 1, CAUGHT: 2, IDLE: 3, DIZZY: 4, ATTACKING: 5 };
+const CState = { GRABBING: 1, CAUGHT: 2, IDLE: 3, DIZZY: 4, ATTACKING: 5, TUMBLE_FALL: 6, CRASH_LAND: 7, FROZEN: 8, STAMINA_KO: 9, DEAD: 10, BARREL: 11, EGG: 12 };
 const HitBoxSprite = { GRAB: 2, MASTER: 24, HIT: 1 };
 class Point {
     constructor(x, y) { this.x = x; this.y = y; }
@@ -145,6 +146,7 @@ class Character {
         this.m_grabbed = [];
         this.m_internalGrabLock = false;
         this.m_strengthGrabLocked = false;
+        this.m_strengthDizzyTimer = 0;
         this.m_justPummeled = false;
         this.CurrentScale = new Point(2, 3);
         this.state = CState.IDLE;
@@ -178,10 +180,20 @@ function compileBody(parameters, body) {
 }
 
 for (const name of ['getStrengthScore', 'getStrengthCollisionScale', 'getStrengthGrabRatio', 'initializeStrengthGrab',
-    'isStrengthPummel', 'getStrengthDizzy', 'getStrengthAttacker', 'releaseOpponent', 'removeUngrabbedCharacters', 'toGrabbing']) {
+    'isStrengthPummel', 'getStrengthDizzy', 'applyStrengthDizzy', 'm_checkDizzy', 'checkFrameControl', 'killAllSpeeds', 'getStrengthAttacker', 'releaseOpponent', 'removeUngrabbedCharacters', 'toGrabbing']) {
     const m = method(characterSource, name);
     Character.prototype[name] = compileBody(m.parameters, m.body);
 }
+const stateBody = method(characterSource, 'setState').body;
+const cleanupStart = stateBody.indexOf('if (state != CState.DIZZY)');
+assert.ok(cleanupStart >= 0);
+const cleanupOpening = stateBody.indexOf('{', cleanupStart);
+const cleanupDizzy = compileBody('state', stateBody.slice(cleanupStart, cleanupOpening) +
+    '{' + bodyAt(stateBody, cleanupOpening) + '}');
+Character.prototype.setState = function(state) {
+    this.state = this.m_state = state;
+    cleanupDizzy.call(this, state);
+};
 const projectileOrigin = method(projectileSource, 'isStrengthNormalAttackSource');
 Projectile.prototype.isStrengthNormalAttackSource = compileBody(projectileOrigin.parameters, projectileOrigin.body);
 const originGetter = /function get StrengthNormalAttack\(\)[^{]*\{/.exec(projectileSource);
@@ -215,7 +227,8 @@ test('Actual DK cargo escape timer scales, freezes natural/mash escape, and reta
     const escape = method(fixture, 'getFree');
     const getFree = compileBody(escape.parameters, escape.body);
     function setup(holder, victim, options = null) {
-        holder.m_characterStats.LinkageID = 'donkeykong';
+        holder.m_characterStats.LinkageID = dkStats.linkage_id;
+        holder.m_characterStats.StatsName = dkStats.statsName;
         holder.m_attack = { Frame: 'throw_forward' };
         holder.m_grabbed = [victim];
         holder.m_timers = [];
@@ -272,7 +285,8 @@ test('Actual DK cargo escape timer scales, freezes natural/mash escape, and reta
     // Other character scripts and other DK callbacks receive no cargo modifier.
     const unrelated = new Character(114, 75);
     unrelated.Stance = { endTimer: 100, getFree() {} }; unrelated.m_attack = { Frame: 'b' };
-    unrelated.m_characterStats.LinkageID = 'donkeykong'; unrelated.m_timers = [];
+    unrelated.m_characterStats.LinkageID = dkStats.linkage_id;
+    unrelated.m_characterStats.StatsName = dkStats.statsName; unrelated.m_timers = [];
     unrelated.createTimer(1, 0, unrelated.Stance.getFree);
     assert.equal(unrelated.Stance.endTimer, 100);
 });
@@ -534,12 +548,12 @@ test('Normal attack dizziness includes every normal family and excludes specials
         'a_forwardsmash', 'a_up', 'a_air', 'a_air_forward', 'a_air_backward',
         'a_air_up', 'a_air_down', 'crouch_attack', 'getup_attack', 'ledge_attack'];
     const hit = { Owner: attacker, Damage: 1, HasEffect: true, IsThrow: false };
-    for (const Frame of normalFrames) assert.equal(victim.getStrengthDizzy({ ...hit, Frame }, attacker, ratio), 90);
+    for (const Frame of normalFrames) assert.equal(victim.getStrengthDizzy({ ...hit, Frame }, attacker, ratio), 900);
     for (const Frame of ['b', 'b_up', 'b_down', 'b_forward_air', 'special', 'throw_forward', 'grab', 'item', null]) {
         assert.equal(victim.getStrengthDizzy({ ...hit, Frame }, attacker, ratio), 0);
     }
     const jab = { ...hit, Frame: 'a' };
-    assert.equal(S.getDizzyDuration(2.499999), 0); assert.equal(S.getDizzyDuration(2.5), 90);
+    assert.equal(S.getDizzyDuration(2.499999), 0); assert.equal(S.getDizzyDuration(2.5), 900);
     assert.equal(victim.getStrengthDizzy(jab, attacker, 1), 0);
     assert.equal(victim.getStrengthDizzy({ ...jab, Damage: 0 }, attacker, ratio), 0);
     assert.equal(victim.getStrengthDizzy({ ...jab, HasEffect: false }, attacker, ratio), 0);
@@ -590,7 +604,7 @@ test('Normal-projectile dizziness preserves launch provenance; specials and refl
     special.m_strengthNormalAttack = special.isStrengthNormalAttackSource(attacker);
     assert.equal(special.StrengthNormalAttack, false);
     const attack = { Owner: normal, Frame: 'attack_idle', HasEffect: true, Damage: 1, IsThrow: false };
-    assert.equal(victim.getStrengthDizzy(attack, attacker, ratio), 90);
+    assert.equal(victim.getStrengthDizzy(attack, attacker, ratio), 900);
     assert.equal(victim.getStrengthDizzy({ ...attack, Owner: special }, attacker, ratio), 0);
     const child = new Projectile(normal);
     child.m_strengthNormalAttack = child.isStrengthNormalAttackSource(normal);
@@ -605,6 +619,76 @@ test('Normal-projectile dizziness preserves launch provenance; specials and refl
     attacker.AttackStateData.IsThrow = false; attacker.UsingFinalSmash = true;
     assert.equal(normal.isStrengthNormalAttackSource(attacker), false);
     assert.ok(projectileSource.includes('this.m_strengthNormalAttack = this.isStrengthNormalAttackSource(this.m_owner);'));
+});
+
+test('Stock DK cargo identification uses packaged statsName/linkage rather than the roster filename', () => {
+    assert.equal(dkStats.statsName, 'donkeykong');
+    assert.equal(dkStats.linkage_id, 'dkong');
+    assert.equal(dkStats.weight1, 114); assert.equal(dkStats.height, 75);
+    assert.ok(cargoCreateTimer.body.includes('this.m_characterStats.StatsName == "donkeykong"'));
+    assert.ok(cargoCreateTimer.body.includes('this.m_characterStats.LinkageID == "dkong"'));
+    assert.ok(!cargoCreateTimer.body.includes('this.m_characterStats.LinkageID == "donkeykong"'));
+});
+
+test('Strength dizziness clears launch and stays airborne until 900 unshortened grounded frames finish', () => {
+    assert.equal(S.STRENGTH_DIZZY_FRAMES, 900);
+    const victim = new Character();
+    Object.assign(victim, {
+        m_collision: { ground: false }, m_sprite: { stance: {} }, m_facingForward: true,
+        m_stunCancelTimer: new context.FrameTimer(10),
+        m_xSpeed: 4, m_ySpeed: -12, m_xKnockback: 30, m_yKnockback: -40,
+        m_forcedCrash: true, m_forceTumbleFall: true,
+        stopActionShot() { this.m_actionShot = this.m_paralysis = false; }, resetRotation() {},
+        Struggle() { throw new Error('Mashing must not shorten strength dizziness'); },
+        playFrame(frame) { this.frame = frame; }, currentFrameIs(frame) { return this.frame === frame; },
+        initiateCrash() { throw new Error('Landing must not convert strength dizziness into a get-up'); }
+    });
+    victim.applyStrengthDizzy(900);
+    assert.equal(victim.state, CState.DIZZY);
+    for (const speed of ['m_xSpeed', 'm_ySpeed', 'm_xKnockback', 'm_yKnockback']) assert.equal(victim[speed], 0);
+    assert.equal(victim.m_forcedCrash, false); assert.equal(victim.m_forceTumbleFall, false);
+    for (let i = 0; i < 1000; i++) {
+        victim.m_checkDizzy(); victim.checkFrameControl();
+        assert.equal(victim.state, CState.DIZZY);
+    }
+    assert.equal(victim.m_strengthDizzyTimer, 900); assert.equal(victim.frame, 'falling');
+    victim.m_collision.ground = true;
+    victim.checkFrameControl();
+    assert.equal(victim.state, CState.DIZZY); assert.equal(victim.frame, 'dizzy');
+    for (let i = 0; i < 899; i++) { victim.m_checkDizzy(); victim.checkFrameControl(); }
+    assert.equal(victim.state, CState.DIZZY); assert.equal(victim.m_strengthDizzyTimer, 1);
+    victim.m_checkDizzy();
+    assert.equal(victim.state, CState.IDLE); assert.equal(victim.m_strengthDizzyTimer, 0);
+    assert.equal(victim.m_dizzyTimer, 0);
+    victim.applyStrengthDizzy(900); victim.setState(CState.DEAD);
+    assert.equal(victim.m_strengthDizzyTimer, 0);
+    victim.setState(CState.CAUGHT); victim.applyStrengthDizzy(900);
+    assert.equal(victim.state, CState.CAUGHT); assert.equal(victim.m_strengthDizzyTimer, 0);
+    victim.setState(CState.IDLE); victim.m_characterStats.StatusEffectImmunity = true;
+    victim.applyStrengthDizzy(900); assert.equal(victim.state, CState.IDLE);
+});
+
+test('Strength dizzy finalization runs after native launch, crash and knockback stacking in both hit branches', () => {
+    const damage = method(characterSource, 'takeDamage').body;
+    assert.equal((damage.match(/this.applyStrengthDizzy\(strengthDizzyBonus\);/g) || []).length, 2);
+    for (const match of damage.matchAll(/this.applyStrengthDizzy\(strengthDizzyBonus\);/g)) {
+        assert.match(damage.slice(match.index), /^this.applyStrengthDizzy\(strengthDizzyBonus\);\s*return \(true\);/);
+    }
+    const start = damage.indexOf('if (((strengthDizzyBonus > 0)');
+    const end = damage.indexOf('applyKnockbackSpeed(tempVelocity, angle);', start);
+    assert.ok(start > 0 && end > start);
+    const suppress = compileBody('strengthDizzyBonus',
+        'var strengthDizzy:int = 0; var strengthMatchupArmored:Boolean = false; ' +
+        'var wasDizzy:Boolean = false; var tempVelocity:Number = 80; ' +
+        damage.slice(start, end) + '\nreturn tempVelocity;');
+    const victim = new Character(); victim.m_collision = { ground: true };
+    assert.equal(suppress.call(victim, 900), 0); assert.equal(suppress.call(victim, 0), 80);
+    // Native move/shield dizziness keeps its existing mash and airborne rules.
+    Object.assign(victim, { state: CState.DIZZY, m_strengthDizzyTimer: 0, m_dizzyTimer: 90,
+        m_dizzyShield: false, m_stunCancelTimer: new context.FrameTimer(10), Struggle: () => 12 });
+    victim.m_checkDizzy(); assert.equal(victim.m_dizzyTimer, 77);
+    victim.m_collision.ground = false; victim.m_checkDizzy();
+    assert.equal(victim.state, CState.TUMBLE_FALL);
 });
 
 console.log(checks + ' strength regression checks passed. Animate/AIR build and gameplay testing still required.');

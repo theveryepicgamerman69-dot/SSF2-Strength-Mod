@@ -183,6 +183,7 @@ package com.mcleodgaming.ssf2.engine
         private var m_hasBounced:Boolean;
         private var m_stunTimer:int;
         private var m_dizzyTimer:int;
+        private var m_strengthDizzyTimer:int = 0;
         private var m_stunCancelTimer:FrameTimer;
         private var m_dizzyShield:Boolean;
         private var m_pitfallTimer:int;
@@ -663,6 +664,7 @@ package com.mcleodgaming.ssf2.engine
             this.m_attackDelay = 0;
             this.m_stunTimer = 0;
             this.m_dizzyTimer = 0;
+            this.m_strengthDizzyTimer = 0;
             this.m_stunCancelTimer = new FrameTimer(10);
             this.m_dizzyShield = false;
             this.m_pitfallTimer = 0;
@@ -1239,6 +1241,10 @@ package com.mcleodgaming.ssf2.engine
                 this.validateControlsBuffer();
             };
             m_state = state;
+            if (state != CState.DIZZY)
+            {
+                this.m_strengthDizzyTimer = 0;
+            };
             if (((oldState === CState.EGG) && (!(inState(CState.EGG)))))
             {
                 this.egg(false);
@@ -3112,6 +3118,21 @@ package com.mcleodgaming.ssf2.engine
             var loss:int;
             if (inState(CState.DIZZY))
             {
+                if (this.m_strengthDizzyTimer > 0)
+                {
+                    // An airborne victim falls normally, then serves the full dizzy duration.
+                    // Neither airborne recovery nor mashing can cancel strength dizziness.
+                    if (m_collision.ground)
+                    {
+                        this.m_strengthDizzyTimer--;
+                        this.m_dizzyTimer = this.m_strengthDizzyTimer;
+                        if (this.m_strengthDizzyTimer <= 0)
+                        {
+                            this.setState(CState.IDLE);
+                        };
+                    };
+                    return;
+                };
                 this.m_stunCancelTimer.tick();
                 if ((((!(m_collision.ground)) && (this.m_stunCancelTimer.IsComplete)) && (!(this.m_dizzyShield))))
                 {
@@ -5222,7 +5243,8 @@ package com.mcleodgaming.ssf2.engine
             // The stock DK cargo movie owns its own escape timer; m_grabTimer is not used.
             // Keep the original callback identity so native throws/escape can destroy it.
             var cargoClip:MovieClip = this.Stance;
-            if (StrengthSystem.ENABLED && this.m_characterStats.LinkageID == "donkeykong" &&
+            if (StrengthSystem.ENABLED &&
+                (this.m_characterStats.StatsName == "donkeykong" || this.m_characterStats.LinkageID == "dkong") &&
                 m_attack.Frame == "throw_forward" && this.m_grabbed.length > 0 && cargoClip &&
                 "getFree" in cargoClip && "endTimer" in cargoClip && func === cargoClip["getFree"])
             {
@@ -5265,6 +5287,31 @@ package com.mcleodgaming.ssf2.engine
                 return 0;
             };
             return StrengthSystem.getDizzyDuration(ratio);
+        }
+
+        private function applyStrengthDizzy(frames:int):void
+        {
+            if (frames <= 0 || this.isInvincible() || isIntangible() ||
+                this.m_characterStats.StatusEffectImmunity || inState(CState.DEAD) ||
+                inState(CState.STAMINA_KO) || inState(CState.BARREL) || inState(CState.CAUGHT) ||
+                inState(CState.FROZEN) || inState(CState.EGG))
+            {
+                return;
+            };
+            // Apply after every launch/stack/crash calculation, so those cannot overwrite it.
+            this.m_strengthDizzyTimer = frames;
+            this.m_dizzyTimer = frames;
+            this.m_dizzyShield = false;
+            this.m_forceTumbleFall = false;
+            this.m_forcedCrash = false;
+            this.m_hitLagCanCancelWithJump = false;
+            this.m_hitLagCanCancelWithUpB = false;
+            this.killAllSpeeds();
+            this.setState(CState.DIZZY);
+            this.stopActionShot();
+            this.m_stunCancelTimer.reset();
+            this.resetRotation();
+            Utils.rotateAroundCenter(m_sprite.stance, m_facingForward, 0);
         }
 
         private function getStrengthAttacker(attackObj:AttackDamage):Character
@@ -12988,8 +13035,9 @@ package com.mcleodgaming.ssf2.engine
             var strengthMatchupArmored:Boolean = strengthAttacker != null && !attackObj.IsThrow &&
                 !inState(CState.CAUGHT) && attackObj.Damage > 0 &&
                 StrengthSystem.hasMatchupArmor(strengthRatio);
-            var strengthDizzy:int = strengthMatchupArmored ? 0 : Math.max(attackObj.Dizzy,
-                this.getStrengthDizzy(attackObj, strengthAttacker, strengthRatio));
+            var strengthDizzy:int = strengthMatchupArmored ? 0 : attackObj.Dizzy;
+            var strengthDizzyBonus:int = strengthMatchupArmored ? 0 :
+                this.getStrengthDizzy(attackObj, strengthAttacker, strengthRatio);
             var strengthDamageMultiplier:Number = 1.0;
             if (attackObj.Damage > 0)
             {
@@ -13420,7 +13468,7 @@ package com.mcleodgaming.ssf2.engine
                     STAGEDATA.playSpecificSound(attackObj.MeteorSFX);
                 };
                 this.killAllSpeeds();
-                if (((((!strengthMatchupArmored && strengthDizzy > 0)) && ((wasDizzy) || (!(m_collision.ground)))) && (!(this.m_characterStats.StatusEffectImmunity))))
+                if (((strengthDizzyBonus > 0) || (((!strengthMatchupArmored && strengthDizzy > 0)) && ((wasDizzy) || (!(m_collision.ground))))) && (!(this.m_characterStats.StatusEffectImmunity)))
                 {
                     tempVelocity = 0;
                 };
@@ -13747,6 +13795,7 @@ package com.mcleodgaming.ssf2.engine
                     this.freeze(false);
                     attachEffect("freeze_break");
                 };
+                this.applyStrengthDizzy(strengthDizzyBonus);
                 return (true);
             };
             if (strengthArmored || (((((((!(attackObj.HasEffect)) && (!(inState(CState.LEDGE_HANG)))) && (!(inState(CState.LEDGE_CLIMB)))) && (!(inState(CState.LEDGE_ROLL)))) && (!((inState(CState.ATTACKING)) && (m_attack.Frame == "ledge_attack")))) && (!((isIntangible()) && (attackObj.Damage > 0)))) && (!((this.m_characterStats.WindArmor > 0) && (preWindKnockbackSpeed <= this.m_characterStats.WindArmor)))))
@@ -14018,6 +14067,7 @@ package com.mcleodgaming.ssf2.engine
                     this.freeze(false);
                     attachEffect("freeze_break");
                 };
+                this.applyStrengthDizzy(strengthDizzyBonus);
                 return (true);
             };
             if (flipSuperArmor)
@@ -15985,7 +16035,11 @@ package com.mcleodgaming.ssf2.engine
                 }
                 else
                 {
-                    if (currentFrameIs("falling"))
+                    if (this.m_strengthDizzyTimer > 0)
+                    {
+                        this.playFrame("dizzy");
+                    }
+                    else if (currentFrameIs("falling"))
                     {
                         this.initiateCrash();
                         this.m_forcedCrash = true;
